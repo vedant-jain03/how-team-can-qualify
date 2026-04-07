@@ -28,8 +28,6 @@ jobs:
 
       - name: Fetch and update standings
         run: node scripts/update-standings.mjs
-        env:
-          CRIC_API_KEY: ${{ secrets.CRIC_API_KEY }}
 
       - name: Commit if standings changed
         run: |
