@@ -1,11 +1,11 @@
 /**
  * scripts/update-standings.mjs
  *
- * Fetches the current IPL 2026 points table from CricAPI and rewrites
- * src/data/teams.js with fresh standings data.
+ * Fetches the current IPL 2026 points table from the official iplt20.com
+ * backend (S3-hosted JSONP feed) — no API key required.
  *
- * Runs via GitHub Actions daily. Also runnable locally:
- *   CRIC_API_KEY=yourkey node scripts/update-standings.mjs
+ * Runs via GitHub Actions 3x/day. Also runnable locally:
+ *   node scripts/update-standings.mjs
  */
 
 import fs from "fs";
@@ -15,121 +15,95 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEAMS_FILE = path.join(__dirname, "../src/data/teams.js");
 
-// IPL 2026 series ID on CricAPI
-const IPL_SERIES_ID = "your-ipl-2026-series-id"; // UPDATE after checking CricAPI
-
-const API_KEY = process.env.CRIC_API_KEY;
-if (!API_KEY) {
-  console.error("❌  CRIC_API_KEY env var not set");
-  process.exit(1);
-}
+// Official iplt20.com JSONP feed — no auth needed
+const STANDINGS_URL =
+  "https://ipl-stats-sports-mechanic.s3.ap-south-1.amazonaws.com/ipl/feeds/stats/284-groupstandings.js";
 
 // ─── Static team metadata (colors, emoji — never changes) ───────────────────
 const TEAM_META = {
-  "Punjab Kings":                  { id: "pbks", shortName: "PBKS", primary: "#ED1B24", secondary: "#DCDDDE", accent: "#fff",    textOnPrimary: "#fff",    emoji: "🦁" },
-  "Royal Challengers Bengaluru":   { id: "rcb",  shortName: "RCB",  primary: "#EC1C24", secondary: "#000000", accent: "#C8A84B", textOnPrimary: "#fff",    emoji: "🔥" },
-  "Rajasthan Royals":              { id: "rr",   shortName: "RR",   primary: "#254AA5", secondary: "#FFC72C", accent: "#FFC72C", textOnPrimary: "#fff",    emoji: "👑" },
-  "Delhi Capitals":                { id: "dc",   shortName: "DC",   primary: "#0078BC", secondary: "#EF1C25", accent: "#EF1C25", textOnPrimary: "#fff",    emoji: "⚡" },
-  "Sunrisers Hyderabad":           { id: "srh",  shortName: "SRH",  primary: "#F26522", secondary: "#000000", accent: "#FDB913", textOnPrimary: "#fff",    emoji: "☀️" },
-  "Mumbai Indians":                { id: "mi",   shortName: "MI",   primary: "#004BA0", secondary: "#D1AB3E", accent: "#D1AB3E", textOnPrimary: "#fff",    emoji: "💙" },
-  "Lucknow Super Giants":          { id: "lsg",  shortName: "LSG",  primary: "#A0CFF0", secondary: "#FFCC00", accent: "#FFCC00", textOnPrimary: "#002D5B", emoji: "🦅" },
-  "Kolkata Knight Riders":         { id: "kkr",  shortName: "KKR",  primary: "#3A225D", secondary: "#B3A123", accent: "#B3A123", textOnPrimary: "#B3A123", emoji: "🕵️" },
-  "Gujarat Titans":                { id: "gt",   shortName: "GT",   primary: "#1C1C1C", secondary: "#1D9BF0", accent: "#1D9BF0", textOnPrimary: "#1D9BF0", emoji: "🏔️" },
-  "Chennai Super Kings":           { id: "csk",  shortName: "CSK",  primary: "#F5C400", secondary: "#0081E9", accent: "#0081E9", textOnPrimary: "#111111", emoji: "🦁" },
+  CSK:  { id: "csk",  name: "Chennai Super Kings",          shortName: "CSK",  primary: "#F5C400", secondary: "#0081E9", accent: "#0081E9", textOnPrimary: "#111111", emoji: "🦁" },
+  MI:   { id: "mi",   name: "Mumbai Indians",               shortName: "MI",   primary: "#004BA0", secondary: "#D1AB3E", accent: "#D1AB3E", textOnPrimary: "#fff",    emoji: "💙" },
+  RCB:  { id: "rcb",  name: "Royal Challengers Bengaluru",  shortName: "RCB",  primary: "#EC1C24", secondary: "#000000", accent: "#C8A84B", textOnPrimary: "#fff",    emoji: "🔥" },
+  DC:   { id: "dc",   name: "Delhi Capitals",               shortName: "DC",   primary: "#0078BC", secondary: "#EF1C25", accent: "#EF1C25", textOnPrimary: "#fff",    emoji: "⚡" },
+  PBKS: { id: "pbks", name: "Punjab Kings",                 shortName: "PBKS", primary: "#ED1B24", secondary: "#DCDDDE", accent: "#fff",    textOnPrimary: "#fff",    emoji: "🦁" },
+  KKR:  { id: "kkr",  name: "Kolkata Knight Riders",        shortName: "KKR",  primary: "#3A225D", secondary: "#B3A123", accent: "#B3A123", textOnPrimary: "#B3A123", emoji: "🕵️" },
+  SRH:  { id: "srh",  name: "Sunrisers Hyderabad",          shortName: "SRH",  primary: "#F26522", secondary: "#000000", accent: "#FDB913", textOnPrimary: "#fff",    emoji: "☀️" },
+  RR:   { id: "rr",   name: "Rajasthan Royals",             shortName: "RR",   primary: "#254AA5", secondary: "#FFC72C", accent: "#FFC72C", textOnPrimary: "#fff",    emoji: "👑" },
+  GT:   { id: "gt",   name: "Gujarat Titans",               shortName: "GT",   primary: "#1C1C1C", secondary: "#1D9BF0", accent: "#1D9BF0", textOnPrimary: "#1D9BF0", emoji: "🏔️" },
+  LSG:  { id: "lsg",  name: "Lucknow Super Giants",         shortName: "LSG",  primary: "#A0CFF0", secondary: "#FFCC00", accent: "#FFCC00", textOnPrimary: "#002D5B", emoji: "🦅" },
 };
 
-// Fallback static data — used if API fails, so the site never breaks
-const FALLBACK_TEAMS = [
-  { name: "Punjab Kings",               p: 3,  w: 2, l: 0, nr: 1, pts: 5,  nrr:  0.637, remaining: 11, recentForm: ["W","NR","W"], topBatter: "Cooper Connolly (108 runs)",  topBowler: "V. Vyshak (5 wkts)"    },
-  { name: "Royal Challengers Bengaluru",p: 2,  w: 2, l: 0, nr: 0, pts: 4,  nrr:  2.501, remaining: 12, recentForm: ["W","W"],     topBatter: "Devdutt Padikkal (111 runs)", topBowler: "Jacob Duffy (5 wkts)"  },
-  { name: "Rajasthan Royals",           p: 2,  w: 2, l: 0, nr: 0, pts: 4,  nrr:  2.233, remaining: 12, recentForm: ["W","W"],     topBatter: "Riyan Parag",                topBowler: "Ravi Bishnoi (5 wkts)" },
-  { name: "Delhi Capitals",             p: 2,  w: 2, l: 0, nr: 0, pts: 4,  nrr:  1.170, remaining: 12, recentForm: ["W","W"],     topBatter: "Sameer Rizvi (160 runs)",    topBowler: "T. Natarajan (4 wkts)" },
-  { name: "Sunrisers Hyderabad",        p: 3,  w: 1, l: 2, nr: 0, pts: 2,  nrr:  0.275, remaining: 11, recentForm: ["L","L","W"], topBatter: "H. Klaasen (145 runs)",      topBowler: "Harsh Dubey (4 wkts)"  },
-  { name: "Mumbai Indians",             p: 2,  w: 1, l: 1, nr: 0, pts: 2,  nrr: -0.206, remaining: 12, recentForm: ["L","W"],     topBatter: "Rohit Sharma (113 runs)",    topBowler: "Jasprit Bumrah"        },
-  { name: "Lucknow Super Giants",       p: 2,  w: 1, l: 1, nr: 0, pts: 2,  nrr: -0.542, remaining: 12, recentForm: ["L","W"],     topBatter: "Nicholas Pooran",            topBowler: "Prince Yadav (4 wkts)" },
-  { name: "Kolkata Knight Riders",      p: 3,  w: 0, l: 2, nr: 1, pts: 1,  nrr: -1.964, remaining: 11, recentForm: ["NR","L","L"],topBatter: "A. Raghuvanshi (103 runs)",  topBowler: "Varun Chakravarthy"    },
-  { name: "Gujarat Titans",             p: 2,  w: 0, l: 2, nr: 0, pts: 0,  nrr: -0.424, remaining: 12, recentForm: ["L","L"],     topBatter: "Shubman Gill",               topBowler: "Prasidh Krishna (4 wkts)"},
-  { name: "Chennai Super Kings",        p: 3,  w: 0, l: 3, nr: 0, pts: 0,  nrr: -2.517, remaining: 11, recentForm: ["L","L","L"], topBatter: "Sarfaraz Khan (99 runs)",    topBowler: "Anshul Kamboj (5 wkts)"},
-];
 
-// ─── Fetch points table from CricAPI ────────────────────────────────────────
+// ─── Fetch & parse JSONP from iplt20.com ────────────────────────────────────
 async function fetchStandings() {
-  const url = `https://api.cricapi.com/v1/series_points?apikey=${API_KEY}&id=${IPL_SERIES_ID}`;
-  console.log("📡 Fetching standings from CricAPI...");
+  console.log("📡 Fetching standings from iplt20.com S3 feed...");
 
-  const res = await fetch(url);
+  const res = await fetch(STANDINGS_URL, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; ipl-tracker-bot/1.0)" },
+    signal: AbortSignal.timeout(15000),
+  });
+
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-  const json = await res.json();
-  if (json.status !== "success") throw new Error(`API error: ${json.reason || "unknown"}`);
+  const text = await res.text();
 
-  return json.data; // array of team standing objects
-}
+  // Strip JSONP wrapper: ongroupstandings({...}) → {...}
+  const match = text.match(/ongroupstandings\s*\(\s*(\{[\s\S]*\})\s*\)/);
+  if (!match) throw new Error("Unexpected JSONP format — could not parse response");
 
-// ─── Fetch recent match results per team ────────────────────────────────────
-async function fetchRecentForm() {
-  const url = `https://api.cricapi.com/v1/series_matches?apikey=${API_KEY}&id=${IPL_SERIES_ID}`;
-  const res = await fetch(url);
-  if (!res.ok) return {};
-
-  const json = await res.json();
-  if (json.status !== "success") return {};
-
-  // Build a map of teamName → last 3 results ["W","L","W"]
-  const formMap = {};
-  const matches = (json.data || [])
-    .filter((m) => m.matchStarted && m.matchEnded)
-    .slice(-30); // last 30 completed matches
-
-  for (const match of matches) {
-    if (!match.teams || !match.winner) continue;
-    for (const team of match.teams) {
-      if (!formMap[team]) formMap[team] = [];
-      const result = match.winner === team ? "W"
-        : match.winner === "NR" ? "NR"
-        : "L";
-      formMap[team].unshift(result); // newest first
-    }
+  const data = JSON.parse(match[1]);
+  // Response structure: { points: [ {...team...}, ... ] }
+  const rows = data?.points;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("No standings rows in response");
   }
 
-  // Trim to last 3
-  for (const t of Object.keys(formMap)) {
-    formMap[t] = formMap[t].slice(0, 3);
-  }
-
-  return formMap;
+  return rows;
 }
 
-// ─── Merge API data with static metadata ────────────────────────────────────
-function mergeTeams(standings, formMap, fallback) {
-  return standings.map((s) => {
-    const name = s.teamname;
-    const meta = TEAM_META[name];
+// ─── Parse Performance string → recentForm array ────────────────────────────
+// Performance field looks like: "W 1,L 2,N 3" or "W,W,L" — varies by season
+function parseForm(perf) {
+  if (!perf) return [];
+  // Split on comma, take the letter before space or end
+  return perf
+    .split(",")
+    .map((s) => {
+      const c = s.trim()[0];
+      if (c === "W") return "W";
+      if (c === "L") return "L";
+      if (c === "N") return "NR";
+      return null;
+    })
+    .filter(Boolean)
+    .slice(0, 5); // newest first, max 5
+}
+
+// ─── Merge API rows with static metadata ────────────────────────────────────
+function mergeTeams(rows) {
+  return rows.map((r) => {
+    const code = r.TeamCode?.trim().toUpperCase();
+    const meta = TEAM_META[code];
     if (!meta) {
-      console.warn(`⚠️  Unknown team name from API: "${name}" — skipping`);
+      console.warn(`⚠️  Unknown team code: "${code}" — skipping`);
       return null;
     }
 
-    // Find fallback for static fields like topBatter/topBowler
-    const fb = fallback.find((f) => f.name === name) || {};
-
-    const p   = parseInt(s.matchesPlayed ?? s.played ?? 0);
-    const w   = parseInt(s.win ?? s.won ?? 0);
-    const l   = parseInt(s.loss ?? s.lost ?? 0);
-    const nr  = parseInt(s.nr ?? s.noResult ?? 0);
-    const pts = parseInt(s.points ?? s.pts ?? 0);
-    const nrr = parseFloat(s.nrr ?? s.netRunRate ?? 0);
-    const remaining = 14 - p;
-    const recentForm = formMap[name] || fb.recentForm || ["?","?","?"];
+    const p   = parseInt(r.Matches   ?? 0);
+    const w   = parseInt(r.Wins      ?? 0);
+    const l   = parseInt(r.Loss      ?? 0);
+    const nr  = parseInt(r.NoResult  ?? 0);
+    const pts = parseInt(r.Points    ?? 0);
+    const nrr = parseFloat(r.NetRunRate ?? 0);
 
     return {
       ...meta,
-      name,
-      p, w, l, nr, pts, nrr,
-      remaining,
-      recentForm,
-      topBatter: fb.topBatter || "—",
-      topBowler: fb.topBowler || "—",
+      p, w, l, nr, pts,
+      nrr: parseFloat(nrr.toFixed(3)),
+      remaining: 14 - p,
+      recentForm: parseForm(r.Performance),
+      topBatter: "—",
+      topBowler: "—",
     };
   }).filter(Boolean);
 }
@@ -159,8 +133,8 @@ function writeTeamsFile(teams) {
 
   const content = `// AUTO-GENERATED by scripts/update-standings.mjs
 // Last updated: ${now}
+// Source: iplt20.com official S3 feed (no API key required)
 // Do not edit manually — changes will be overwritten on next run.
-// To update manually, run: CRIC_API_KEY=yourkey node scripts/update-standings.mjs
 
 export const TEAMS = [
 ${teamLines}
@@ -177,31 +151,12 @@ export const PLAYOFF_THRESHOLD = 14;
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 async function main() {
-  let teams;
+  const rows = await fetchStandings();
+  const teams = mergeTeams(rows);
 
-  try {
-    const [standings, formMap] = await Promise.all([
-      fetchStandings(),
-      fetchRecentForm(),
-    ]);
+  if (teams.length === 0) throw new Error("Got 0 teams from feed — something is wrong");
 
-    teams = mergeTeams(standings, formMap, FALLBACK_TEAMS);
-
-    if (teams.length === 0) {
-      throw new Error("API returned 0 teams — using fallback");
-    }
-
-    console.log(`📊  Got standings for ${teams.length} teams`);
-  } catch (err) {
-    console.error(`⚠️  API fetch failed: ${err.message}`);
-    console.log("📦  Using fallback static data instead");
-
-    teams = FALLBACK_TEAMS.map((t) => ({
-      ...TEAM_META[t.name],
-      ...t,
-    }));
-  }
-
+  console.log(`📊  Got standings for ${teams.length} teams`);
   writeTeamsFile(teams);
 }
 
