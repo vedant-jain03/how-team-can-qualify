@@ -7,16 +7,33 @@ import LiveBanner from "./components/LiveBanner";
 import "./styles.css";
 
 export default function App() {
-  const [selected, setSelected] = useState(null);
-  const [teams, setTeams] = useState(TEAMS);
+  const [teams] = useState(TEAMS);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [liveMatch, setLiveMatch] = useState(null);
 
+  // Read initial team from URL ?team=csk
+  const initialTeamId = new URLSearchParams(window.location.search).get("team");
+  const [selected, setSelected] = useState(
+    () => teams.find((t) => t.id === initialTeamId) ?? null
+  );
+
   const handleSelect = useCallback((team) => {
-    setSelected((prev) => (prev?.id === team.id ? null : team));
+    setSelected((prev) => {
+      const next = prev?.id === team.id ? null : team;
+      const url = new URL(window.location);
+      if (next) url.searchParams.set("team", next.id);
+      else url.searchParams.delete("team");
+      window.history.pushState({}, "", url);
+      return next;
+    });
   }, []);
 
-  const handleClose = useCallback(() => setSelected(null), []);
+  const handleClose = useCallback(() => {
+    setSelected(null);
+    const url = new URL(window.location);
+    url.searchParams.delete("team");
+    window.history.pushState({}, "", url);
+  }, []);
 
   // Try fetching live data from CricAPI (free tier)
   useEffect(() => {
